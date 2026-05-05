@@ -1,0 +1,330 @@
+# Galleon Deployment Workflow (App Runner - Starter Tier)
+# Generated for: test-fastapi
+# Stack: fastapi-ecs
+# Tier: Starter (App Runner with auto-scaling)
+#
+# This workflow handles both:
+# 1. First deploy: Provisions App Runner infrastructure with Terraform
+# 2. Subsequent deploys: Builds and pushes image, App Runner auto-deploys
+
+name: Deploy test-fastapi
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      destroy:
+        description: 'Destroy infrastructure (WARNING: This will delete all resources)'
+        type: boolean
+        default: false
+      skip_deploy:
+        description: 'Skip deployment (only run Terraform)'
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  APP_NAME: test-fastapi
+  ENVIRONMENT: production
+  INFRA_DIR: infrastructure
+  DOCKERFILE_CONTEXT: .
+
+jobs:
+  # ==================================
+  # Check Infrastructure State
+  # ==================================
+  check-infrastructure:
+    name: Check Infrastructure
+    runs-on: ubuntu-latest
+    outputs:
+      needs_provision: ${{ steps.check.outputs.needs_provision }}
+      ecr_repository: ${{ steps.outputs.outputs.ecr_repository }}
+      service_arn: ${{ steps.outputs.outputs.service_arn }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::152858029978:role/GalleonDeployer
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Setup Terraform State Bucket
+        id: state-bucket
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="galleon-tfstate-${ACCOUNT_ID}-${{ env.AWS_REGION }}"
+          echo "TF_STATE_BUCKET=$BUCKET_NAME" >> $GITHUB_ENV
+
+          # Create bucket if it doesn't exist
+          if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Creating Terraform state bucket: $BUCKET_NAME"
+            if [ "${{ env.AWS_REGION }}" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET_NAME"
+            else
+              aws s3api create-bucket --bucket "$BUCKET_NAME" --region ${{ env.AWS_REGION }} --create-bucket-configuration LocationConstraint=${{ env.AWS_REGION }}
+            fi
+            aws s3api put-bucket-versioning --bucket "$BUCKET_NAME" --versioning-configuration Status=Enabled
+            aws s3api put-bucket-encryption --bucket "$BUCKET_NAME" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+            aws s3api put-public-access-block --bucket "$BUCKET_NAME" --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+            echo "Bucket created successfully"
+          else
+            echo "Using existing bucket: $BUCKET_NAME"
+          fi
+
+      - name: Terraform Init
+        id: init
+        working-directory: ${{ env.INFRA_DIR }}
+        run: terraform init -backend-config="bucket=${{ env.TF_STATE_BUCKET }}"
+        continue-on-error: true
+
+      - name: Check Terraform State
+        id: check
+        working-directory: ${{ env.INFRA_DIR }}
+        run: |
+          if terraform state list 2>/dev/null | grep -q .; then
+            echo "needs_provision=false" >> $GITHUB_OUTPUT
+            echo "Infrastructure exists"
+          else
+            echo "needs_provision=true" >> $GITHUB_OUTPUT
+            echo "Infrastructure needs provisioning"
+          fi
+
+      - name: Get Terraform Outputs
+        id: outputs
+        if: steps.check.outputs.needs_provision == 'false'
+        working-directory: ${{ env.INFRA_DIR }}
+        run: |
+          ECR_REPO=$(terraform output -raw ecr_repository_url 2>/dev/null || echo '')
+          SERVICE_ARN=$(terraform output -raw service_arn 2>/dev/null || echo '')
+
+          if [ -z "$ECR_REPO" ]; then
+            echo "::warning::ecr_repository_url terraform output is empty"
+          fi
+          if [ -z "$SERVICE_ARN" ]; then
+            echo "::warning::service_arn terraform output is empty - App Runner may not be fully provisioned"
+          fi
+
+          echo "ecr_repository=$ECR_REPO" >> $GITHUB_OUTPUT
+          echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
+
+  # ==================================
+  # Provision Infrastructure
+  # ==================================
+  provision:
+    name: Provision Infrastructure
+    needs: check-infrastructure
+    if: |
+      (needs.check-infrastructure.outputs.needs_provision == 'true' || github.event.inputs.destroy == 'true')
+      && github.event.inputs.destroy != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      ecr_repository: ${{ steps.outputs.outputs.ecr_repository }}
+      service_arn: ${{ steps.outputs.outputs.service_arn }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::152858029978:role/GalleonDeployer
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Setup Terraform State Bucket
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="galleon-tfstate-${ACCOUNT_ID}-${{ env.AWS_REGION }}"
+          echo "TF_STATE_BUCKET=$BUCKET_NAME" >> $GITHUB_ENV
+
+          # Create bucket if it doesn't exist (should already exist from check job)
+          if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Creating Terraform state bucket: $BUCKET_NAME"
+            if [ "${{ env.AWS_REGION }}" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET_NAME"
+            else
+              aws s3api create-bucket --bucket "$BUCKET_NAME" --region ${{ env.AWS_REGION }} --create-bucket-configuration LocationConstraint=${{ env.AWS_REGION }}
+            fi
+            aws s3api put-bucket-versioning --bucket "$BUCKET_NAME" --versioning-configuration Status=Enabled
+            aws s3api put-bucket-encryption --bucket "$BUCKET_NAME" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+            aws s3api put-public-access-block --bucket "$BUCKET_NAME" --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+          fi
+
+      - name: Terraform Init
+        working-directory: ${{ env.INFRA_DIR }}
+        run: terraform init -backend-config="bucket=${{ env.TF_STATE_BUCKET }}"
+
+      - name: Terraform Plan
+        working-directory: ${{ env.INFRA_DIR }}
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ${{ env.INFRA_DIR }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get Terraform Outputs
+        id: outputs
+        working-directory: ${{ env.INFRA_DIR }}
+        run: |
+          echo "ecr_repository=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
+          echo "service_arn=$(terraform output -raw service_arn)" >> $GITHUB_OUTPUT
+
+  # ==================================
+  # Build & Deploy Application
+  # ==================================
+  deploy:
+    name: Build & Deploy
+    needs: [check-infrastructure, provision]
+    if: |
+      always()
+      && !failure()
+      && !cancelled()
+      && github.event.inputs.destroy != 'true'
+      && github.event.inputs.skip_deploy != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::152858029978:role/GalleonDeployer
+          aws-region: us-east-1
+
+      - name: Set ECR Repository URL
+        id: ecr
+        run: |
+          # Use output from provision if available, otherwise from check
+          if [ -n "${{ needs.provision.outputs.ecr_repository }}" ]; then
+            echo "url=${{ needs.provision.outputs.ecr_repository }}" >> $GITHUB_OUTPUT
+            echo "service_arn=${{ needs.provision.outputs.service_arn }}" >> $GITHUB_OUTPUT
+          else
+            echo "url=${{ needs.check-infrastructure.outputs.ecr_repository }}" >> $GITHUB_OUTPUT
+            echo "service_arn=${{ needs.check-infrastructure.outputs.service_arn }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker Image
+        working-directory: ${{ env.DOCKERFILE_CONTEXT }}
+        run: |
+          docker build -t ${{ steps.ecr.outputs.url }}:${{ github.sha }} .
+          docker tag ${{ steps.ecr.outputs.url }}:${{ github.sha }} ${{ steps.ecr.outputs.url }}:latest
+
+      - name: Push Docker Image
+        run: |
+          docker push ${{ steps.ecr.outputs.url }}:${{ github.sha }}
+          docker push ${{ steps.ecr.outputs.url }}:latest
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Setup Terraform State Bucket
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="galleon-tfstate-${ACCOUNT_ID}-${{ env.AWS_REGION }}"
+          echo "TF_STATE_BUCKET=$BUCKET_NAME" >> $GITHUB_ENV
+
+      - name: Terraform Init
+        working-directory: ${{ env.INFRA_DIR }}
+        run: terraform init -backend-config="bucket=${{ env.TF_STATE_BUCKET }}"
+
+      - name: Update App Runner to use ECR image
+        working-directory: ${{ env.INFRA_DIR }}
+        run: |
+          echo "Updating App Runner service to use ECR image..."
+          terraform apply -auto-approve -var="use_ecr_image=true"
+
+      - name: Get Updated Service ARN
+        id: tf_outputs
+        working-directory: ${{ env.INFRA_DIR }}
+        run: |
+          SERVICE_ARN=$(terraform output -raw service_arn 2>/dev/null || echo '')
+          echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
+
+      - name: Trigger App Runner Deployment
+        run: |
+          SERVICE_ARN="${{ steps.tf_outputs.outputs.service_arn }}"
+          if [ -z "$SERVICE_ARN" ]; then
+            echo "::error::service_arn is empty. Cannot trigger App Runner deployment."
+            echo ""
+            echo "This usually means one of:"
+            echo "  1. The App Runner service hasn't been provisioned yet"
+            echo "  2. Terraform state doesn't contain the service_arn output"
+            echo "  3. The App Runner service was deleted outside of Terraform"
+            echo ""
+            echo "To fix: Re-run the workflow without 'Skip Deploy' to reprovision infrastructure."
+            exit 1
+          fi
+          echo "Triggering App Runner deployment..."
+          aws apprunner start-deployment --service-arn "$SERVICE_ARN"
+          echo "Deployment started! App Runner will automatically deploy the new image."
+
+  # ==================================
+  # Destroy Infrastructure (Manual)
+  # ==================================
+  destroy:
+    name: Destroy Infrastructure
+    if: github.event.inputs.destroy == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::152858029978:role/GalleonDeployer
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Setup Terraform State Bucket
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="galleon-tfstate-${ACCOUNT_ID}-${{ env.AWS_REGION }}"
+          echo "TF_STATE_BUCKET=$BUCKET_NAME" >> $GITHUB_ENV
+
+      - name: Terraform Init
+        working-directory: ${{ env.INFRA_DIR }}
+        run: terraform init -backend-config="bucket=${{ env.TF_STATE_BUCKET }}"
+
+      - name: Terraform Destroy
+        working-directory: ${{ env.INFRA_DIR }}
+        run: |
+          MAX_ATTEMPTS=3
+          WAIT_SECONDS=120
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "Destroy attempt $attempt of $MAX_ATTEMPTS"
+            if terraform destroy -auto-approve; then
+              echo "Destroy succeeded"
+              exit 0
+            fi
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              echo "Destroy failed, waiting ${WAIT_SECONDS}s for AWS propagation before retry..."
+              sleep $WAIT_SECONDS
+            fi
+          done
+          echo "::error::Terraform destroy failed after $MAX_ATTEMPTS attempts"
+          exit 1
