@@ -11,6 +11,12 @@ variable "environment" {
   default     = "production"
 }
 
+variable "container_image" {
+  description = "Container image to deploy (set by GitHub Actions)"
+  type        = string
+  default     = ""
+}
+
 variable "container_port" {
   description = "Port the container listens on"
   type        = number
@@ -27,6 +33,12 @@ variable "task_memory" {
   description = "Memory in MB for App Runner (512, 1024, 2048, 3072, 4096, 6144, 8192, 10240, 12288)"
   type        = string
   default     = "512"
+}
+
+variable "desired_count" {
+  description = "Desired number of instances (informational for App Runner which uses min/max)"
+  type        = number
+  default     = 1
 }
 
 variable "min_capacity" {
@@ -51,6 +63,12 @@ variable "health_check_path" {
   description = "Health check endpoint path"
   type        = string
   default     = "/health"
+}
+
+variable "enable_workers" {
+  description = "Enable background worker processes"
+  type        = bool
+  default     = false
 }
 
 variable "environment_variables" {
