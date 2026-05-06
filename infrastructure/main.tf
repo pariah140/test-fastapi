@@ -110,14 +110,9 @@ resource "aws_apprunner_auto_scaling_configuration_version" "main" {
   tags = var.tags
 }
 
-# Local to determine if ECR image exists (for first deploy vs subsequent)
-locals {
-  # AWS's official hello-app-runner bootstrap image
-  bootstrap_image = "public.ecr.aws/aws-containers/hello-app-runner:latest"
-}
-
 # Wait for IAM role propagation before creating App Runner service
 resource "time_sleep" "iam_propagation" {
+  count           = var.use_ecr_image ? 1 : 0
   depends_on      = [
     aws_iam_role.apprunner_ecr_access,
     aws_iam_role.apprunner_instance,
@@ -126,17 +121,14 @@ resource "time_sleep" "iam_propagation" {
   create_duration = "15s"
 }
 
-# App Runner Service
+# App Runner Service — only created after ECR image is pushed
 resource "aws_apprunner_service" "main" {
+  count        = var.use_ecr_image ? 1 : 0
   service_name = var.name
 
   source_configuration {
-    # Only use ECR auth when using private ECR image
-    dynamic "authentication_configuration" {
-      for_each = var.use_ecr_image ? [1] : []
-      content {
-        access_role_arn = aws_iam_role.apprunner_ecr_access.arn
-      }
+    authentication_configuration {
+      access_role_arn = aws_iam_role.apprunner_ecr_access.arn
     }
 
     image_repository {
@@ -144,8 +136,8 @@ resource "aws_apprunner_service" "main" {
         port = tostring(var.container_port)
         runtime_environment_variables = var.environment_variables
       }
-      image_identifier      = var.use_ecr_image ? "${aws_ecr_repository.main.repository_url}:latest" : local.bootstrap_image
-      image_repository_type = var.use_ecr_image ? "ECR" : "ECR_PUBLIC"
+      image_identifier      = "${aws_ecr_repository.main.repository_url}:latest"
+      image_repository_type = "ECR"
     }
 
     auto_deployments_enabled = false  # We control deployments via GitHub Actions
@@ -161,7 +153,7 @@ resource "aws_apprunner_service" "main" {
 
   health_check_configuration {
     protocol            = "HTTP"
-    path                = var.use_ecr_image ? var.health_check_path : "/"
+    path                = var.health_check_path
     interval            = 10
     timeout             = 5
     healthy_threshold   = 1

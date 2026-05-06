@@ -2,17 +2,17 @@
 
 output "service_url" {
   description = "App Runner service URL"
-  value       = aws_apprunner_service.main.service_url
+  value       = var.use_ecr_image ? aws_apprunner_service.main[0].service_url : ""
 }
 
 output "service_arn" {
   description = "App Runner service ARN"
-  value       = aws_apprunner_service.main.arn
+  value       = var.use_ecr_image ? aws_apprunner_service.main[0].arn : ""
 }
 
 output "service_id" {
   description = "App Runner service ID"
-  value       = aws_apprunner_service.main.service_id
+  value       = var.use_ecr_image ? aws_apprunner_service.main[0].service_id : ""
 }
 
 output "ecr_repository_url" {
