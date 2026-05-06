@@ -212,13 +212,24 @@ jobs:
         id: ecr
         run: |
           # Use output from provision if available, otherwise from check
+          ECR_URL=""
+          SERVICE_ARN=""
           if [ -n "${{ needs.provision.outputs.ecr_repository }}" ]; then
-            echo "url=${{ needs.provision.outputs.ecr_repository }}" >> $GITHUB_OUTPUT
-            echo "service_arn=${{ needs.provision.outputs.service_arn }}" >> $GITHUB_OUTPUT
+            ECR_URL="${{ needs.provision.outputs.ecr_repository }}"
+            SERVICE_ARN="${{ needs.provision.outputs.service_arn }}"
           else
-            echo "url=${{ needs.check-infrastructure.outputs.ecr_repository }}" >> $GITHUB_OUTPUT
-            echo "service_arn=${{ needs.check-infrastructure.outputs.service_arn }}" >> $GITHUB_OUTPUT
+            ECR_URL="${{ needs.check-infrastructure.outputs.ecr_repository }}"
+            SERVICE_ARN="${{ needs.check-infrastructure.outputs.service_arn }}"
           fi
+
+          # Fail early if ECR URL is empty (provision was skipped or failed to output)
+          if [ -z "$ECR_URL" ]; then
+            echo "::error::ECR repository URL is empty — infrastructure may not be provisioned"
+            exit 1
+          fi
+
+          echo "url=$ECR_URL" >> $GITHUB_OUTPUT
+          echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
