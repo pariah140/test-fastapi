@@ -27,6 +27,11 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+locals {
+  # ALB and target group names have a 32-character limit
+  short_name = substr("${var.name}-${var.environment}", 0, 28)
+}
+
 # --- Networking (public subnets only, no NAT gateway) ---
 
 resource "aws_vpc" "main" {
@@ -172,7 +177,7 @@ resource "aws_security_group" "ecs" {
 # --- Application Load Balancer ---
 
 resource "aws_lb" "main" {
-  name               = "${var.name}-${var.environment}-alb"
+  name               = "${local.short_name}-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
@@ -184,7 +189,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "main" {
-  name        = "${var.name}-${var.environment}-tg"
+  name        = "${local.short_name}-tg"
   port        = var.container_port
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
