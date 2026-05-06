@@ -9,17 +9,12 @@ environment = "production"
 use_ecr_image = false
 
 # Container Configuration
-container_image = "PLACEHOLDER"  # Will be set by GitHub Actions
 container_port  = 8000
 task_cpu        = "512"
 task_memory     = "1024"
-desired_count   = 2
 min_capacity    = 1
 max_capacity    = 10
 health_check_path = "/health"
-
-# Worker Configuration
-enable_workers = false
 
 # Tags
 tags = {

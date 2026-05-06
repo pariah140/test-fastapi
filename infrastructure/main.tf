@@ -9,6 +9,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
   }
 }
 
@@ -112,6 +116,16 @@ locals {
   bootstrap_image = "public.ecr.aws/aws-containers/hello-app-runner:latest"
 }
 
+# Wait for IAM role propagation before creating App Runner service
+resource "time_sleep" "iam_propagation" {
+  depends_on      = [
+    aws_iam_role.apprunner_ecr_access,
+    aws_iam_role.apprunner_instance,
+    aws_iam_role_policy_attachment.apprunner_ecr_access,
+  ]
+  create_duration = "15s"
+}
+
 # App Runner Service
 resource "aws_apprunner_service" "main" {
   service_name = var.name
@@ -157,6 +171,6 @@ resource "aws_apprunner_service" "main" {
   tags = var.tags
 
   depends_on = [
-    aws_iam_role_policy_attachment.apprunner_ecr_access
+    time_sleep.iam_propagation
   ]
 }
