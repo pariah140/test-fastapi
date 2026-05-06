@@ -1,13 +1,13 @@
-# Galleon Deployment Workflow (App Runner - Starter Tier)
+# Galleon Deployment Workflow (ECS Fargate - Starter Tier)
 # Generated for: test-fastapi
 # Stack: fastapi-ecs
-# Tier: Starter (App Runner with auto-scaling)
 #
 # This workflow handles both:
-# 1. First deploy: Provisions App Runner infrastructure with Terraform
-# 2. Subsequent deploys: Builds and pushes image, App Runner auto-deploys
+# 1. First deploy: Provisions infrastructure with Terraform
+# 2. Subsequent deploys: Builds and deploys the application
 
 name: Deploy test-fastapi
+run-name: ${{ github.event.inputs.destroy == 'true' && 'Destroy' || 'Deploy' }} test-fastapi
 
 on:
   push:
@@ -44,7 +44,8 @@ jobs:
     outputs:
       needs_provision: ${{ steps.check.outputs.needs_provision }}
       ecr_repository: ${{ steps.outputs.outputs.ecr_repository }}
-      service_arn: ${{ steps.outputs.outputs.service_arn }}
+      ecs_cluster: ${{ steps.outputs.outputs.ecs_cluster }}
+      ecs_service: ${{ steps.outputs.outputs.ecs_service }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -106,18 +107,9 @@ jobs:
         if: steps.check.outputs.needs_provision == 'false'
         working-directory: ${{ env.INFRA_DIR }}
         run: |
-          ECR_REPO=$(terraform output -raw ecr_repository_url 2>/dev/null || echo '')
-          SERVICE_ARN=$(terraform output -raw service_arn 2>/dev/null || echo '')
-
-          if [ -z "$ECR_REPO" ]; then
-            echo "::warning::ecr_repository_url terraform output is empty"
-          fi
-          if [ -z "$SERVICE_ARN" ]; then
-            echo "::warning::service_arn terraform output is empty - App Runner may not be fully provisioned"
-          fi
-
-          echo "ecr_repository=$ECR_REPO" >> $GITHUB_OUTPUT
-          echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
+          echo "ecr_repository=$(terraform output -raw ecr_repository_url 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "ecs_cluster=$(terraform output -raw ecs_cluster_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "ecs_service=$(terraform output -raw ecs_service_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
 
   # ==================================
   # Provision Infrastructure
@@ -131,7 +123,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ecr_repository: ${{ steps.outputs.outputs.ecr_repository }}
-      service_arn: ${{ steps.outputs.outputs.service_arn }}
+      ecs_cluster: ${{ steps.outputs.outputs.ecs_cluster }}
+      ecs_service: ${{ steps.outputs.outputs.ecs_service }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -183,7 +176,8 @@ jobs:
         working-directory: ${{ env.INFRA_DIR }}
         run: |
           echo "ecr_repository=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
-          echo "service_arn=$(terraform output -raw service_arn)" >> $GITHUB_OUTPUT
+          echo "ecs_cluster=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_OUTPUT
+          echo "ecs_service=$(terraform output -raw ecs_service_name)" >> $GITHUB_OUTPUT
 
   # ==================================
   # Build & Deploy Application
@@ -212,24 +206,15 @@ jobs:
         id: ecr
         run: |
           # Use output from provision if available, otherwise from check
-          ECR_URL=""
-          SERVICE_ARN=""
           if [ -n "${{ needs.provision.outputs.ecr_repository }}" ]; then
-            ECR_URL="${{ needs.provision.outputs.ecr_repository }}"
-            SERVICE_ARN="${{ needs.provision.outputs.service_arn }}"
+            echo "url=${{ needs.provision.outputs.ecr_repository }}" >> $GITHUB_OUTPUT
+            echo "cluster=${{ needs.provision.outputs.ecs_cluster }}" >> $GITHUB_OUTPUT
+            echo "service=${{ needs.provision.outputs.ecs_service }}" >> $GITHUB_OUTPUT
           else
-            ECR_URL="${{ needs.check-infrastructure.outputs.ecr_repository }}"
-            SERVICE_ARN="${{ needs.check-infrastructure.outputs.service_arn }}"
+            echo "url=${{ needs.check-infrastructure.outputs.ecr_repository }}" >> $GITHUB_OUTPUT
+            echo "cluster=${{ needs.check-infrastructure.outputs.ecs_cluster }}" >> $GITHUB_OUTPUT
+            echo "service=${{ needs.check-infrastructure.outputs.ecs_service }}" >> $GITHUB_OUTPUT
           fi
-
-          # Fail early if ECR URL is empty (provision was skipped or failed to output)
-          if [ -z "$ECR_URL" ]; then
-            echo "::error::ECR repository URL is empty — infrastructure may not be provisioned"
-            exit 1
-          fi
-
-          echo "url=$ECR_URL" >> $GITHUB_OUTPUT
-          echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -245,51 +230,21 @@ jobs:
           docker push ${{ steps.ecr.outputs.url }}:${{ github.sha }}
           docker push ${{ steps.ecr.outputs.url }}:latest
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
-
-      - name: Setup Terraform State Bucket
+      - name: Update ECS Service
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          BUCKET_NAME="galleon-tfstate-${ACCOUNT_ID}-${{ env.AWS_REGION }}"
-          echo "TF_STATE_BUCKET=$BUCKET_NAME" >> $GITHUB_ENV
+          aws ecs update-service \
+            --cluster ${{ steps.ecr.outputs.cluster }} \
+            --service ${{ steps.ecr.outputs.service }} \
+            --force-new-deployment
 
-      - name: Terraform Init
-        working-directory: ${{ env.INFRA_DIR }}
-        run: terraform init -backend-config="bucket=${{ env.TF_STATE_BUCKET }}"
-
-      - name: Update App Runner to use ECR image
-        working-directory: ${{ env.INFRA_DIR }}
+      - name: Wait for Deployment
         run: |
-          echo "Updating App Runner service to use ECR image..."
-          terraform apply -auto-approve -var="use_ecr_image=true"
-
-      - name: Get Updated Service ARN
-        id: tf_outputs
-        working-directory: ${{ env.INFRA_DIR }}
-        run: |
-          SERVICE_ARN=$(terraform output -raw service_arn 2>/dev/null || echo '')
-          echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
-
-      - name: Trigger App Runner Deployment
-        run: |
-          SERVICE_ARN="${{ steps.tf_outputs.outputs.service_arn }}"
-          if [ -z "$SERVICE_ARN" ]; then
-            echo "::error::service_arn is empty. Cannot trigger App Runner deployment."
-            echo ""
-            echo "This usually means one of:"
-            echo "  1. The App Runner service hasn't been provisioned yet"
-            echo "  2. Terraform state doesn't contain the service_arn output"
-            echo "  3. The App Runner service was deleted outside of Terraform"
-            echo ""
-            echo "To fix: Re-run the workflow without 'Skip Deploy' to reprovision infrastructure."
-            exit 1
-          fi
-          echo "Triggering App Runner deployment..."
-          aws apprunner start-deployment --service-arn "$SERVICE_ARN"
-          echo "Deployment started! App Runner will automatically deploy the new image."
+          echo "Waiting for ECS service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ steps.ecr.outputs.cluster }} \
+            --services ${{ steps.ecr.outputs.service }} \
+            --no-cli-pager || true
+          echo "Deployment complete!"
 
   # ==================================
   # Destroy Infrastructure (Manual)
@@ -320,6 +275,12 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ env.INFRA_DIR }}
         run: terraform init -backend-config="bucket=${{ env.TF_STATE_BUCKET }}"
+
+      - name: Disable Deletion Protection
+        working-directory: ${{ env.INFRA_DIR }}
+        run: |
+          echo "Disabling deletion protection before destroy..."
+          terraform apply -auto-approve             -var="deletion_protection=false"             -target=module.database.aws_db_instance.main || true
 
       - name: Terraform Destroy
         working-directory: ${{ env.INFRA_DIR }}

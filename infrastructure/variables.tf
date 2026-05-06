@@ -1,4 +1,6 @@
-# App Runner Variables
+/**
+ * ECS Starter Stack - Variables
+ */
 
 variable "name" {
   description = "Application name"
@@ -6,9 +8,21 @@ variable "name" {
 }
 
 variable "environment" {
-  description = "Deployment environment"
+  description = "Environment (dev, staging, prod)"
   type        = string
-  default     = "production"
+}
+
+# Networking
+variable "vpc_cidr" {
+  description = "VPC CIDR block"
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+# Container
+variable "container_image" {
+  description = "Docker image for the application"
+  type        = string
 }
 
 variable "container_port" {
@@ -18,33 +32,33 @@ variable "container_port" {
 }
 
 variable "task_cpu" {
-  description = "CPU units for App Runner (256, 512, 1024, 2048, 4096)"
+  description = "Task CPU units (256, 512, 1024, 2048, 4096)"
   type        = string
   default     = "256"
 }
 
 variable "task_memory" {
-  description = "Memory in MB for App Runner (512, 1024, 2048, 3072, 4096, 6144, 8192, 10240, 12288)"
+  description = "Task memory in MB"
   type        = string
   default     = "512"
 }
 
+variable "desired_count" {
+  description = "Desired number of tasks"
+  type        = number
+  default     = 1
+}
+
 variable "min_capacity" {
-  description = "Minimum number of instances (App Runner minimum is 1)"
+  description = "Minimum number of tasks for auto-scaling"
   type        = number
   default     = 1
 }
 
 variable "max_capacity" {
-  description = "Maximum number of instances"
+  description = "Maximum number of tasks for auto-scaling"
   type        = number
   default     = 3
-}
-
-variable "max_concurrency" {
-  description = "Maximum concurrent requests per instance before scaling"
-  type        = number
-  default     = 100
 }
 
 variable "health_check_path" {
@@ -53,20 +67,15 @@ variable "health_check_path" {
   default     = "/health"
 }
 
-variable "environment_variables" {
-  description = "Environment variables for the application"
-  type        = map(string)
-  default     = {}
+# Logging
+variable "log_retention_days" {
+  description = "CloudWatch Logs retention in days"
+  type        = number
+  default     = 14
 }
 
 variable "tags" {
-  description = "Tags to apply to resources"
+  description = "Additional tags for all resources"
   type        = map(string)
   default     = {}
-}
-
-variable "use_ecr_image" {
-  description = "Whether to use ECR image (false for initial bootstrap with public hello-app-runner image)"
-  type        = bool
-  default     = false
 }
